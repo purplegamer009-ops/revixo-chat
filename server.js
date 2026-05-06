@@ -62,7 +62,7 @@ const server = http.createServer(async (req, res) => {
     return send(res, 200, { ok: true, active, total: Object.keys(sessions).length });
   }
 
-  // ── VISITOR: start chat ──────────────────────────────────────────────
+  // -- VISITOR: start chat ----------------------------------------------
   if (path === '/chat/start' && req.method === 'POST') {
     const body = await parseBody(req);
     const { sessionId, name } = body;
@@ -73,7 +73,7 @@ const server = http.createServer(async (req, res) => {
 
     const msg = await webhook({
       embeds: [{
-        title: '💬 New Chat — ' + (name || 'Visitor'),
+        title: '- New Chat - ' + (name || 'Visitor'),
         color: 3447003,
         description: [
           '**To reply via Discord:**',
@@ -88,7 +88,7 @@ const server = http.createServer(async (req, res) => {
           'Or use the **Staff Dashboard** on the site to reply.'
         ].join('\n'),
         fields: [{ name: 'Session', value: '`' + sid6 + '`', inline: true }],
-        footer: { text: 'Revixo · revixo.ca' },
+        footer: { text: 'Revixo - revixo.ca' },
         timestamp: new Date().toISOString()
       }]
     });
@@ -97,7 +97,7 @@ const server = http.createServer(async (req, res) => {
     return send(res, 200, { ok: true });
   }
 
-  // ── VISITOR: send message ────────────────────────────────────────────
+  // -- VISITOR: send message --------------------------------------------
   if (path === '/chat/send' && req.method === 'POST') {
     const body = await parseBody(req);
     const { sessionId, name, message } = body;
@@ -113,14 +113,14 @@ const server = http.createServer(async (req, res) => {
         color: 5793266,
         author: { name: (name || sess.name) + ' says:' },
         description: message,
-        footer: { text: '!reply:' + sessionId + ' <your reply>  ·  !end:' + sessionId }
+        footer: { text: '!reply:' + sessionId + ' <your reply>  -  !end:' + sessionId }
       }]
     });
 
     return send(res, 200, { ok: true });
   }
 
-  // ── VISITOR: poll for owner replies ─────────────────────────────────
+  // -- VISITOR: poll for owner replies ---------------------------------
   if (path === '/chat/poll' && req.method === 'GET') {
     const sessionId = qs.get('sessionId');
     const sess = sessions[sessionId];
@@ -129,7 +129,7 @@ const server = http.createServer(async (req, res) => {
     return send(res, 200, { replies: pending, ended: sess.ended });
   }
 
-  // ── OWNER: reply to visitor (from dashboard OR Discord webhook) ──────
+  // -- OWNER: reply to visitor (from dashboard OR Discord webhook) ------
   if (path === '/chat/reply' && req.method === 'POST') {
     const body = await parseBody(req);
     const { sessionId, message, secret } = body;
@@ -148,14 +148,14 @@ const server = http.createServer(async (req, res) => {
         color: 2664261,
         author: { name: 'You replied to ' + sess.name + ':' },
         description: message,
-        footer: { text: 'Revixo Staff · revixo.ca' }
+        footer: { text: 'Revixo Staff - revixo.ca' }
       }]
     });
 
     return send(res, 200, { ok: true });
   }
 
-  // ── OWNER: end chat ──────────────────────────────────────────────────
+  // -- OWNER: end chat --------------------------------------------------
   if (path === '/chat/end' && req.method === 'POST') {
     const body = await parseBody(req);
     const { sessionId, secret } = body;
@@ -167,15 +167,15 @@ const server = http.createServer(async (req, res) => {
       await webhook({
         embeds: [{
           color: 15158332,
-          description: '🔴 Chat ended — **' + sess.name + '**',
-          footer: { text: 'Revixo · revixo.ca' }
+          description: '- Chat ended - **' + sess.name + '**',
+          footer: { text: 'Revixo - revixo.ca' }
         }]
       });
     }
     return send(res, 200, { ok: true });
   }
 
-  // ── OWNER: list active sessions ──────────────────────────────────────
+  // -- OWNER: list active sessions --------------------------------------
   if (path === '/chat/sessions' && req.method === 'GET') {
     if (qs.get('secret') !== REPLY_SECRET) return send(res, 403, { error: 'forbidden' });
     const active = Object.entries(sessions)
@@ -190,7 +190,7 @@ const server = http.createServer(async (req, res) => {
     return send(res, 200, { sessions: active });
   }
 
-  // ── DISCORD: incoming webhook message (owner types !reply or !end) ───
+  // -- DISCORD: incoming webhook message (owner types !reply or !end) ---
   if (path === '/discord/message' && req.method === 'POST') {
     const body = await parseBody(req);
     const content = (body.content || '').trim();
