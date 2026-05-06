@@ -69,7 +69,7 @@ const server = http.createServer(async (req, res) => {
     if (!sessionId) return send(res, 400, { error: 'missing sessionId' });
 
     const sid6 = sessionId.slice(0, 6).toUpperCase();
-    sessions[sessionId] = { name: name || 'Visitor', replies: [], ended: false, lastActivity: Date.now(), transcript: [], discordMsgId: null };
+    sessions[sessionId] = { name: name || 'Visitor', replies: [], replyIdx: 0, ended: false, lastActivity: Date.now(), transcript: [], discordMsgId: null };
 
     const msg = await webhook({
       embeds: [{
@@ -125,8 +125,9 @@ const server = http.createServer(async (req, res) => {
     const sessionId = qs.get('sessionId');
     const sess = sessions[sessionId];
     if (!sess) return send(res, 200, { replies: [], ended: false });
-    const pending = sess.replies.splice(0);
-    return send(res, 200, { replies: pending, ended: sess.ended });
+    const since = parseInt(qs.get('since') || '0');
+    const pending = sess.replies.slice(since);
+    return send(res, 200, { replies: pending, ended: sess.ended, total: sess.replies.length });
   }
 
   // -- OWNER: reply to visitor (from dashboard OR Discord webhook) ------
@@ -138,7 +139,8 @@ const server = http.createServer(async (req, res) => {
     if (!sess) return send(res, 404, { error: 'session not found' });
     if (sess.ended) return send(res, 200, { ok: true, ended: true });
 
-    sess.replies.push({ text: message, ts: Date.now() });
+    const replyObj = { text: message, ts: Date.now(), idx: sess.replies.length };
+    sess.replies.push(replyObj);
     sess.transcript.push({ from: 'owner', name: 'Revixo', text: message, ts: Date.now() });
     sess.lastActivity = Date.now();
 
