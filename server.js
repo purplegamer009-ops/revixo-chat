@@ -6,7 +6,7 @@ const GUILD_ID  = process.env.GUILD_ID;
 const SECRET    = process.env.REPLY_SECRET;
 const PORT      = process.env.PORT || 3000;
 
-const sessions  = {};
+const sessions  = {};  // sessionId -> session object
 
 // ── ANALYTICS STORE ────────────────────────────────────────────────────────
 const analytics = {
@@ -16,7 +16,7 @@ const analytics = {
   referrals: [],        // [{ts, name, phone, pay, code}]
   chatStarts: [],       // [{ts, name, sessionId}]
 };
-  // sessionId -> session object
+
 const chanMap   = {};  // channelId -> sessionId  (reverse lookup)
 
 // ── UTILS ─────────────────────────────────────────────────────────────────
@@ -292,10 +292,15 @@ const server = http.createServer(async (req, res) => {
   }
 
 
-  // Track page view
+  // Track page view (dedupe same visitor within 30 min)
   if (path === '/track/pageview' && req.method === 'POST') {
     const body = await parseBody(req);
-    analytics.pageViews.push({ ts: Date.now(), ref: body.ref || null, page: body.page || '/' });
+    const fp = body.fp || (req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown');
+    const now = Date.now();
+    const recent = analytics.pageViews.filter(p => p.fp === fp && now - p.ts < 1800000);
+    if (recent.length === 0) {
+      analytics.pageViews.push({ ts: now, ref: body.ref || null, page: body.page || '/', fp });
+    }
     return send(res, 200, { ok: true });
   }
 
@@ -363,8 +368,11 @@ const server = http.createServer(async (req, res) => {
       hourly[h]++;
     });
 
+    // Unique visitors (by fp) today
+    const pvToday = since(pv, day);
+    const uniqueToday = new Set(pvToday.map(p => p.fp || 'unknown')).size;
     return send(res, 200, {
-      pageViews: { today: since(pv, day).length, week: since(pv, week).length, month: since(pv, month).length, total: pv.length },
+      pageViews: { today: uniqueToday, week: since(pv, week).length, month: since(pv, month).length, total: pv.length },
       quotes: { today: since(qe, day).length, week: since(qe, week).length, month: since(qe, month).length, total: qe.length },
       bookings: { today: since(bk, day).length, week: since(bk, week).length, month: since(bk, month).length, total: bk.length },
       chatStarts: { today: since(cs, day).length, week: since(cs, week).length, total: cs.length },
