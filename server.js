@@ -4,7 +4,7 @@ const https = require('https');
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const GUILD_ID  = process.env.GUILD_ID;
 const SECRET    = process.env.REPLY_SECRET;
-const PORT      = process.env.PORT || 3000;
+const PORT      = process.env.PORT || 8080;
 
 const sessions  = {};
 const analytics = {
