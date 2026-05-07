@@ -1,6 +1,7 @@
 {
-  "name": "revixo-chat-server",
+  "name": "revixo-chat",
   "version": "1.0.0",
+  "description": "Revixo live chat server",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
