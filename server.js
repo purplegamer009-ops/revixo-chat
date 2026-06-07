@@ -6,12 +6,14 @@ const GUILD_ID  = process.env.GUILD_ID;
 const SECRET    = process.env.REPLY_SECRET;
 const PORT      = process.env.PORT || 8080;
 
+// ── IN-MEMORY STORE ──────────────────────────────────────────────────────
 const sessions  = {};
 const analytics = {
   pageViews: [], quoteEvents: [], bookings: [], referrals: [], chatStarts: [],
 };
 const chanMap = {};
 
+// ── HELPERS ──────────────────────────────────────────────────────────────
 function parseBody(req) {
   return new Promise(resolve => {
     let raw = '';
@@ -22,14 +24,19 @@ function parseBody(req) {
 
 function cors(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
 }
 
 function send(res, code, data) {
   cors(res);
   res.writeHead(code, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(data));
+}
+
+function auth(qs, res) {
+  if (qs.get('secret') !== SECRET) { send(res, 403, { error: 'forbidden' }); return false; }
+  return true;
 }
 
 function discord(method, path, body) {
@@ -58,6 +65,7 @@ function discord(method, path, body) {
   });
 }
 
+// ── DISCORD CHANNEL MANAGEMENT ────────────────────────────────────────────
 async function createChannel(sessionId, name) {
   const gRes = await discord('GET', `/guilds/${GUILD_ID}/channels`);
   const all  = Array.isArray(gRes.body) ? gRes.body : [];
@@ -82,8 +90,8 @@ async function createChannel(sessionId, name) {
   await discord('POST', `/channels/${channelId}/messages`, {
     embeds: [{
       title: '💬 ' + name + ' opened a live chat',
-      color: 0x0a0a0a,
-      description: 'Just **type normally** in this channel to reply.\n\nType `!end` to close.',
+      color: 0x1a56db,
+      description: 'Type normally to reply.\n\nType `!end` to close the chat.',
       fields: [{ name: 'Session', value: '`' + sessionId + '`', inline: true }],
       footer: { text: 'Revixo Live Chat' },
       timestamp: new Date().toISOString()
@@ -93,7 +101,6 @@ async function createChannel(sessionId, name) {
 }
 
 const pollers = {};
-
 function startChannelPoller(channelId, sessionId) {
   if (pollers[channelId]) return;
   let lastId = null;
@@ -117,7 +124,7 @@ function startChannelPoller(channelId, sessionId) {
         sess.ended = true;
         sess.replies.push({ text: '__ended__', ts: Date.now(), ended: true });
         await discord('POST', `/channels/${channelId}/messages`, {
-          embeds: [{ title: '🔴 Chat closed', color: 0xdc2626, description: 'Deleting in 5s.', footer: { text: 'Revixo' } }]
+          embeds: [{ title: '🔴 Chat closed', color: 0xdc2626, description: 'Deleting channel in 5s.', footer: { text: 'Revixo' } }]
         });
         setTimeout(() => {
           discord('DELETE', `/channels/${channelId}`);
@@ -134,207 +141,233 @@ function startChannelPoller(channelId, sessionId) {
   }, 1500);
 }
 
+// ── HTTP SERVER ──────────────────────────────────────────────────────────
 const server = http.createServer(async (req, res) => {
   cors(res);
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+
   const path = req.url.split('?')[0];
   const qs   = new URLSearchParams(req.url.includes('?') ? req.url.split('?')[1] : '');
 
+  // ── HEALTH ─────────────────────────────────────────────────────────────
   if (path === '/' && req.method === 'GET') {
-    const active = Object.values(sessions).filter(s => !s.ended).length;
-    return send(res, 200, { ok: true, active });
+    return send(res, 200, {
+      status: 'ok',
+      bookings: analytics.bookings.length,
+      referrals: analytics.referrals.length,
+      sessions: Object.keys(sessions).filter(k => !sessions[k].ended).length
+    });
   }
 
+  // ── CHAT ───────────────────────────────────────────────────────────────
   if (path === '/chat/start' && req.method === 'POST') {
     const body = await parseBody(req);
-    const { sessionId, name } = body;
-    if (!sessionId) return send(res, 400, { error: 'missing sessionId' });
-    analytics.chatStarts.push({ ts: Date.now(), name: name || 'Visitor', sessionId });
-    sessions[sessionId] = {
-      name: name || 'Visitor',
-      replies: [],
-      ended: false,
-      lastActivity: Date.now(),
-      transcript: [],
-      channelId: null
+    const id = 'sess_' + Date.now() + '_' + Math.random().toString(36).slice(2,7);
+    sessions[id] = {
+      id, name: body.name || 'Visitor', device: body.device || '',
+      transcript: [], replies: [], started: Date.now(),
+      lastActivity: Date.now(), ended: false, channelId: null
     };
-    createChannel(sessionId, name || 'Visitor').then(channelId => {
-      if (channelId && sessions[sessionId]) {
-        sessions[sessionId].channelId = channelId;
-        chanMap[channelId] = sessionId;
-        startChannelPoller(channelId, sessionId);
-      }
-    }).catch(() => {});
-    return send(res, 200, { ok: true });
+    analytics.chatStarts.push({ ts: Date.now(), name: body.name });
+    const channelId = await createChannel(id, body.name || 'visitor');
+    if (channelId) { sessions[id].channelId = channelId; startChannelPoller(channelId, id); }
+    return send(res, 200, { sessionId: id });
   }
 
   if (path === '/chat/send' && req.method === 'POST') {
     const body = await parseBody(req);
-    const { sessionId, name, message } = body;
-    const sess = sessions[sessionId];
-    if (!sess || sess.ended) return send(res, 200, { ok: true });
+    const sess = sessions[body.sessionId];
+    if (!sess || sess.ended) return send(res, 404, { error: 'session not found' });
+    sess.transcript.push({ from: 'visitor', text: body.message, ts: Date.now() });
     sess.lastActivity = Date.now();
-    sess.transcript.push({ from: 'visitor', name: name || sess.name, text: message, ts: Date.now() });
     if (sess.channelId) {
-      discord('POST', `/channels/${sess.channelId}/messages`, {
-        content: '**' + (name || sess.name) + ':** ' + message
-      }).catch(() => {});
+      await discord('POST', `/channels/${sess.channelId}/messages`, {
+        content: '**' + (sess.name || 'Visitor') + ':** ' + body.message
+      });
     }
     return send(res, 200, { ok: true });
   }
 
   if (path === '/chat/poll' && req.method === 'GET') {
-    const sessionId = qs.get('sessionId');
-    const since     = parseInt(qs.get('since') || '0');
-    const sess      = sessions[sessionId];
-    if (!sess) return send(res, 200, { replies: [], ended: false, total: 0 });
-    return send(res, 200, {
-      replies: sess.replies.slice(since),
-      ended: sess.ended,
-      total: sess.replies.length
-    });
+    const sess = sessions[qs.get('sessionId')];
+    if (!sess) return send(res, 404, { error: 'not found' });
+    const replies = sess.replies.splice(0);
+    return send(res, 200, { replies, ended: sess.ended });
   }
 
   if (path === '/chat/reply' && req.method === 'POST') {
     const body = await parseBody(req);
-    const { sessionId, message, secret } = body;
-    if (secret !== SECRET) return send(res, 403, { error: 'forbidden' });
-    const sess = sessions[sessionId];
+    if (body.secret !== SECRET) return send(res, 403, { error: 'forbidden' });
+    const sess = sessions[body.sessionId];
     if (!sess || sess.ended) return send(res, 404, { error: 'not found' });
-    sess.replies.push({ text: message, ts: Date.now() });
-    sess.transcript.push({ from: 'owner', name: 'Revixo', text: message, ts: Date.now() });
+    sess.replies.push({ text: body.message, ts: Date.now() });
+    sess.transcript.push({ from: 'staff', name: 'Revixo', text: body.message, ts: Date.now() });
     sess.lastActivity = Date.now();
     if (sess.channelId) {
-      discord('POST', `/channels/${sess.channelId}/messages`, {
-        content: '**[Staff Dashboard]** ' + message
-      }).catch(() => {});
+      await discord('POST', `/channels/${sess.channelId}/messages`, {
+        embeds: [{ description: '📤 **Staff:** ' + body.message, color: 0x1a56db }]
+      });
     }
     return send(res, 200, { ok: true });
   }
 
   if (path === '/chat/end' && req.method === 'POST') {
     const body = await parseBody(req);
-    const { sessionId, secret } = body;
-    if (secret !== SECRET) return send(res, 403, { error: 'forbidden' });
-    const sess = sessions[sessionId];
+    if (body.secret !== SECRET) return send(res, 403, { error: 'forbidden' });
+    const sess = sessions[body.sessionId];
     if (sess) {
       sess.ended = true;
-      sess.replies.push({ text: '__ended__', ts: Date.now(), ended: true });
       if (sess.channelId) {
-        discord('POST', `/channels/${sess.channelId}/messages`, {
-          embeds: [{ title: '🔴 Chat ended by staff', color: 0xdc2626 }]
-        }).catch(() => {});
-        setTimeout(() => {
-          discord('DELETE', `/channels/${sess.channelId}`);
-          delete chanMap[sess.channelId];
-        }, 5000);
+        await discord('POST', `/channels/${sess.channelId}/messages`, {
+          embeds: [{ title: '🔴 Chat ended by staff', color: 0xdc2626, footer: { text: 'Revixo' } }]
+        });
+        setTimeout(() => discord('DELETE', `/channels/${sess.channelId}`), 3000);
       }
     }
     return send(res, 200, { ok: true });
   }
 
   if (path === '/chat/sessions' && req.method === 'GET') {
-    if (qs.get('secret') !== SECRET) return send(res, 403, { error: 'forbidden' });
-    const active = Object.entries(sessions)
-      .filter(([, s]) => !s.ended)
-      .map(([id, s]) => ({
-        id, name: s.name,
-        msgs: s.transcript.length,
-        lastActivity: s.lastActivity,
-        transcript: s.transcript
-      }));
+    if (!auth(qs, res)) return;
+    const active = Object.values(sessions)
+      .filter(s => !s.ended && Date.now() - s.lastActivity < 30 * 60 * 1000)
+      .map(s => ({ id: s.id, name: s.name, device: s.device, transcript: s.transcript, started: s.started, lastActivity: s.lastActivity }));
     return send(res, 200, { sessions: active });
   }
 
+  // ── TRACKING ───────────────────────────────────────────────────────────
   if (path === '/track/pageview' && req.method === 'POST') {
-    const body = await parseBody(req);
-    const fp = body.fp || (req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown');
-    const now = Date.now();
-    const recent = analytics.pageViews.filter(p => p.fp === fp && now - p.ts < 1800000);
-    if (recent.length === 0) analytics.pageViews.push({ ts: now, ref: body.ref || null, page: body.page || '/', fp });
+    analytics.pageViews.push({ ts: Date.now() });
     return send(res, 200, { ok: true });
   }
 
   if (path === '/track/quote' && req.method === 'POST') {
     const body = await parseBody(req);
-    analytics.quoteEvents.push({ ts: Date.now(), device: body.device, model: body.model, price: body.price, ref: body.ref || null });
+    analytics.quoteEvents.push({ ts: Date.now(), device: body.device, condition: body.condition, price: body.price });
     return send(res, 200, { ok: true });
   }
 
   if (path === '/track/booking' && req.method === 'POST') {
     const body = await parseBody(req);
-    analytics.bookings.push({
-      ts: Date.now(), name: body.name || 'Unknown', phone: body.phone || '',
-      devices: body.devices || body.device || '', total: body.total || body.price || 0,
-      type: body.type || 'callback', ref: body.ref || null,
-      refName: body.refName || null, refPhone: body.refPhone || null,
-      refPay: body.refPay || null, notes: body.notes || ''
-    });
+    const booking = {
+      ts: Date.now(),
+      name: body.name || 'Unknown',
+      phone: body.phone || '',
+      devices: body.devices || body.device || '',
+      total: body.total || body.price || 0,
+      type: body.type || 'callback',
+      notes: body.notes || '',
+      photos: body.photos || [],
+      ref: body.ref || null,
+      refName: body.refName || null,
+      refPhone: body.refPhone || null,
+      refPay: body.refPay || null,
+    };
+    analytics.bookings.push(booking);
+    // If referral, also record in referrals with "pending" state
+    if (booking.ref) {
+      const existing = analytics.referrals.find(r => r.code === booking.ref);
+      if (existing) {
+        existing.pendingPayout = true;
+        existing.bookedBy = booking.name;
+        existing.bookedAt = Date.now();
+      }
+    }
     return send(res, 200, { ok: true });
   }
 
   if (path === '/track/referral' && req.method === 'POST') {
     const body = await parseBody(req);
-    analytics.referrals.push({ ts: Date.now(), name: body.name, phone: body.phone, pay: body.pay, code: body.code });
+    // Prevent duplicate referral codes
+    const exists = analytics.referrals.find(r => r.code === body.code);
+    if (!exists) {
+      analytics.referrals.push({
+        ts: Date.now(),
+        name: body.name || '',
+        phone: body.phone || '',
+        pay: body.pay || '',
+        code: body.code || '',
+        pendingPayout: false,
+        bookedBy: null,
+        bookedAt: null,
+      });
+    }
     return send(res, 200, { ok: true });
   }
 
-  if (path === '/analytics' && req.method === 'GET') {
-    if (qs.get('secret') !== SECRET) return send(res, 403, { error: 'forbidden' });
-    const now = Date.now(), day = 86400000, week = day*7, month = day*30;
-    const since = (arr, ms) => arr.filter(e => now - e.ts < ms);
-    const pv = analytics.pageViews, qe = analytics.quoteEvents, bk = analytics.bookings;
-    const rf = analytics.referrals, cs = analytics.chatStarts;
-    const revToday = since(bk,day).reduce((s,b)=>s+Number(b.total||0),0);
-    const revWeek  = since(bk,week).reduce((s,b)=>s+Number(b.total||0),0);
-    const revMonth = since(bk,month).reduce((s,b)=>s+Number(b.total||0),0);
-    const deviceCount = {};
-    qe.forEach(q => { deviceCount[q.device] = (deviceCount[q.device]||0)+1; });
-    const hourly = Array(24).fill(0);
-    since(pv,day).forEach(p => { hourly[new Date(p.ts).getHours()]++; });
-    const pvToday = since(pv,day);
-    const uniqueToday = new Set(pvToday.map(p=>p.fp||'unknown')).size;
-    return send(res, 200, {
-      pageViews: { today: uniqueToday, week: since(pv,week).length, month: since(pv,month).length, total: pv.length },
-      quotes: { today: since(qe,day).length, week: since(qe,week).length, month: since(qe,month).length, total: qe.length },
-      bookings: { today: since(bk,day).length, week: since(bk,week).length, month: since(bk,month).length, total: bk.length },
-      chatStarts: { today: since(cs,day).length, week: since(cs,week).length, total: cs.length },
-      revenue: { today: revToday, week: revWeek, month: revMonth },
-      topDevices: Object.entries(deviceCount).sort((a,b)=>b[1]-a[1]).slice(0,5),
-      conversionRate: pv.length>0 ? Math.round((bk.length/pv.length)*100) : 0,
-      hourlyViews: hourly,
-      recentBookings: bk.slice(-20).reverse(),
-      referrals: rf.slice(-50).reverse()
-    });
-  }
-
+  // ── DATA ENDPOINTS ─────────────────────────────────────────────────────
   if (path === '/bookings' && req.method === 'GET') {
-    if (qs.get('secret') !== SECRET) return send(res, 403, { error: 'forbidden' });
-    return send(res, 200, { bookings: analytics.bookings.slice(-100).reverse() });
+    if (!auth(qs, res)) return;
+    return send(res, 200, { bookings: analytics.bookings.slice().reverse() });
   }
 
   if (path === '/referrals' && req.method === 'GET') {
-    if (qs.get('secret') !== SECRET) return send(res, 403, { error: 'forbidden' });
-    return send(res, 200, { referrals: analytics.referrals.slice(-100).reverse() });
+    if (!auth(qs, res)) return;
+    return send(res, 200, { referrals: analytics.referrals.slice().reverse() });
+  }
+
+  if (path === '/analytics' && req.method === 'GET') {
+    if (!auth(qs, res)) return;
+    return send(res, 200, {
+      pageViews: analytics.pageViews.length,
+      quotes: analytics.quoteEvents.length,
+      bookings: analytics.bookings.length,
+      referrals: analytics.referrals.length,
+      chats: analytics.chatStarts.length,
+      activeSessions: Object.values(sessions).filter(s => !s.ended).length,
+    });
   }
 
   if (path === '/quote' && req.method === 'POST') return send(res, 200, { ok: true });
 
+  // ── ADMIN — CLEAR ENDPOINTS ────────────────────────────────────────────
+  if (path === '/admin/clear-bookings' && req.method === 'POST') {
+    const body = await parseBody(req);
+    if (body.secret !== SECRET) return send(res, 403, { error: 'forbidden' });
+    const count = analytics.bookings.length;
+    analytics.bookings.length = 0;
+    return send(res, 200, { ok: true, cleared: count });
+  }
+
+  if (path === '/admin/clear-referrals' && req.method === 'POST') {
+    const body = await parseBody(req);
+    if (body.secret !== SECRET) return send(res, 403, { error: 'forbidden' });
+    const count = analytics.referrals.length;
+    analytics.referrals.length = 0;
+    return send(res, 200, { ok: true, cleared: count });
+  }
+
+  if (path === '/admin/nuke' && req.method === 'POST') {
+    const body = await parseBody(req);
+    if (body.secret !== SECRET) return send(res, 403, { error: 'forbidden' });
+    // Clear all analytics
+    analytics.bookings.length = 0;
+    analytics.referrals.length = 0;
+    analytics.quoteEvents.length = 0;
+    analytics.pageViews.length = 0;
+    analytics.chatStarts.length = 0;
+    // End all active sessions
+    const sessionIds = Object.keys(sessions);
+    for (const id of sessionIds) {
+      sessions[id].ended = true;
+      const channelId = sessions[id].channelId;
+      if (channelId) discord('DELETE', `/channels/${channelId}`).catch(() => {});
+    }
+    return send(res, 200, { ok: true, nuked: { bookings: true, referrals: true, sessions: sessionIds.length } });
+  }
+
+  // 404
   send(res, 404, { error: 'not found' });
 });
 
+// Clean up stale sessions every 30 minutes
 setInterval(() => {
-  const now = Date.now();
-  for (const [id, s] of Object.entries(sessions)) {
-    if (now - s.lastActivity > 1800000) {
-      if (s.channelId) {
-        discord('DELETE', `/channels/${s.channelId}`).catch(()=>{});
-        delete chanMap[s.channelId];
-      }
+  const cutoff = Date.now() - 2 * 60 * 60 * 1000; // 2 hours
+  for (const id of Object.keys(sessions)) {
+    if (sessions[id].ended || sessions[id].lastActivity < cutoff) {
       delete sessions[id];
     }
   }
-}, 1800000);
+}, 30 * 60 * 1000);
 
-// Bind to 0.0.0.0 so Railway can reach it
-server.listen(PORT, '0.0.0.0', () => console.log('Revixo chat v5 on port ' + PORT));
+server.listen(PORT, () => console.log('Revixo backend running on port ' + PORT));
