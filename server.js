@@ -153,11 +153,17 @@ async function createChannel(sessionId, name) {
   chanMap[channelId] = sessionId;
   await discord('POST', `/channels/${channelId}/messages`, {
     embeds: [{
-      title: '💬 ' + name + ' opened a live chat',
+      title: '🟢 New chat — ' + name,
       color: 0x1a56db,
-      description: 'Type normally in this channel to reply.\nType `!end` to close.',
-      fields: [{ name: 'Session', value: '`' + sessionId + '`', inline: true }],
-      footer: { text: 'Revixo Live Chat' },
+      description: 
+        '**To reply:** just type in this channel\n' +
+        '**To close:** type `!end`\n\n' +
+        '> 💡 The visitor sees your messages in real-time on revixo.ca',
+      fields: [
+        { name: '👤 Visitor', value: name, inline: true },
+        { name: '🕐 Started', value: new Date().toLocaleTimeString('en-CA', {hour:'2-digit',minute:'2-digit'}), inline: true },
+      ],
+      footer: { text: 'Revixo Live Chat · ' + sessionId },
       timestamp: new Date().toISOString()
     }]
   });
@@ -310,15 +316,19 @@ const server = http.createServer(async (req, res) => {
   // ── CHAT ─────────────────────────────────────────────────────────────
   if (path === '/chat/start' && req.method === 'POST') {
     const body = await parseBody(req);
-    const id = 'sess_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+    // Use client's sessionId if valid, otherwise generate one
+    const id = (body.sessionId && body.sessionId.length > 5 && !sessions[body.sessionId])
+      ? body.sessionId
+      : 'sess_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
     sessions[id] = {
       id, name: body.name || 'Visitor', device: body.device || '',
-      transcript: [], replies: [], started: Date.now(),
+      transcript: [{ from: 'visitor', text: body.name || 'Visitor', ts: Date.now(), system: true }],
+      replies: [], started: Date.now(),
       lastActivity: Date.now(), ended: false, channelId: null
     };
     const channelId = await createChannel(id, body.name || 'visitor');
     if (channelId) { sessions[id].channelId = channelId; startChannelPoller(channelId, id); }
-    return send(res, 200, { sessionId: id });
+    return send(res, 200, { sessionId: id, ok: true });
   }
 
   if (path === '/chat/send' && req.method === 'POST') {
@@ -329,7 +339,12 @@ const server = http.createServer(async (req, res) => {
     sess.lastActivity = Date.now();
     if (sess.channelId) {
       await discord('POST', `/channels/${sess.channelId}/messages`, {
-        content: '**' + (sess.name || 'Visitor') + ':** ' + body.message
+        embeds: [{
+          description: body.message,
+          color: 0x374151,
+          author: { name: '💬 ' + (sess.name || 'Visitor') },
+          timestamp: new Date().toISOString()
+        }]
       });
     }
     return send(res, 200, { ok: true });
@@ -352,7 +367,12 @@ const server = http.createServer(async (req, res) => {
     sess.lastActivity = Date.now();
     if (sess.channelId) {
       await discord('POST', `/channels/${sess.channelId}/messages`, {
-        embeds: [{ description: '📤 **Staff:** ' + body.message, color: 0x1a56db }]
+        embeds: [{
+          description: body.message,
+          color: 0x1a56db,
+          author: { name: '📤 Revixo Staff' },
+          timestamp: new Date().toISOString()
+        }]
       });
     }
     return send(res, 200, { ok: true });
