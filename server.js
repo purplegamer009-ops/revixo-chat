@@ -272,17 +272,45 @@ async function getReferrals() {
   return memAnalytics.referrals.slice().reverse();
 }
 
-async function markReferralPending(code, bookedBy) {
+async function markReferralPending(code, bookedBy, refData) {
   if (pool) {
     try {
+      // Upsert — create record if it doesn't exist yet, then mark pending
       await pool.query(
-        `UPDATE referrals SET pending_payout=TRUE, booked_by=$1, booked_at=$2 WHERE code=$3`,
-        [bookedBy, Date.now(), code]
+        `INSERT INTO referrals (ts, name, phone, pay, code, pending_payout, booked_by, booked_at)
+         VALUES ($1, $2, $3, $4, $5, TRUE, $6, $7)
+         ON CONFLICT (code) DO UPDATE
+           SET pending_payout = TRUE,
+               booked_by      = EXCLUDED.booked_by,
+               booked_at      = EXCLUDED.booked_at,
+               name           = CASE WHEN referrals.name = '' OR referrals.name IS NULL THEN EXCLUDED.name ELSE referrals.name END,
+               phone          = CASE WHEN referrals.phone = '' OR referrals.phone IS NULL THEN EXCLUDED.phone ELSE referrals.phone END,
+               pay            = CASE WHEN referrals.pay = '' OR referrals.pay IS NULL THEN EXCLUDED.pay ELSE referrals.pay END`,
+        [
+          Date.now(),
+          (refData && refData.refName) || 'Unknown referrer',
+          (refData && refData.refPhone) || '',
+          (refData && refData.refPay) || '',
+          code,
+          bookedBy,
+          Date.now()
+        ]
       );
     } catch (e) { console.error('markReferralPending:', e.message); }
   } else {
     const ref = memAnalytics.referrals.find(r => r.code === code);
-    if (ref) { ref.pendingPayout = true; ref.bookedBy = bookedBy; ref.bookedAt = Date.now(); }
+    if (ref) {
+      ref.pendingPayout = true; ref.bookedBy = bookedBy; ref.bookedAt = Date.now();
+    } else {
+      // Create if missing
+      memAnalytics.referrals.push({
+        ts: Date.now(), code,
+        name: (refData && refData.refName) || 'Unknown referrer',
+        phone: (refData && refData.refPhone) || '',
+        pay: (refData && refData.refPay) || '',
+        pendingPayout: true, bookedBy, bookedAt: Date.now()
+      });
+    }
   }
 }
 
@@ -425,7 +453,7 @@ const server = http.createServer(async (req, res) => {
       refName: body.refName || null, refPhone: body.refPhone || null, refPay: body.refPay || null,
     };
     await saveBooking(booking);
-    if (booking.ref) await markReferralPending(booking.ref, booking.name);
+    if (booking.ref) await markReferralPending(booking.ref, booking.name, booking);
     return send(res, 200, { ok: true });
   }
 
@@ -444,6 +472,23 @@ const server = http.createServer(async (req, res) => {
   if (path === '/referrals' && req.method === 'GET') {
     if (!auth(qs, res)) return;
     return send(res, 200, { referrals: await getReferrals() });
+  }
+
+  // Get info about a specific referral code (for buyer's session)
+  if (path === '/referral-info' && req.method === 'GET') {
+    const code = qs.get('code');
+    if (!code) return send(res, 400, { error: 'missing code' });
+    if (pool) {
+      try {
+        const r = await pool.query('SELECT name, phone, pay FROM referrals WHERE code=$1', [code]);
+        if (r.rows.length) return send(res, 200, r.rows[0]);
+        return send(res, 404, { error: 'not found' });
+      } catch (e) { return send(res, 500, { error: 'db error' }); }
+    } else {
+      const ref = memAnalytics.referrals.find(r => r.code === code);
+      if (ref) return send(res, 200, { name: ref.name, phone: ref.phone, pay: ref.pay });
+      return send(res, 404, { error: 'not found' });
+    }
   }
 
   if (path === '/analytics' && req.method === 'GET') {
