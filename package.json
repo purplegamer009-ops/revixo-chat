@@ -1,15 +1,19 @@
 {
-  "name": "revixo-chat",
-  "version": "2.0.0",
-  "description": "Revixo backend — chat, bookings, referrals",
+  "name": "revixo-chat-relay",
+  "version": "1.0.0",
+  "description": "Two-way live chat relay between revixo.ca and Discord, backed by Postgres",
+  "type": "module",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "engines": {
-    "node": "18.x"
+    "node": ">=18"
   },
   "dependencies": {
-    "pg": "^8.11.3"
+    "express": "^4.19.2",
+    "cors": "^2.8.5",
+    "discord.js": "^14.15.3",
+    "pg": "^8.12.0"
   }
 }
